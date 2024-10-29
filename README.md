@@ -9,7 +9,7 @@ The resulting publications are then classified into different categories:
 | 0        	| No known synonyms or protein names            	|
 
 ## **Usage**
-The Tool can either be imported and established locally, using the code provided above or the code can be utilises using our [workbook](https://colab.research.google.com/drive/1Vmu6a4CxAhM5LqZ-ZKn435ZKkuLI_mH3?usp=sharing).
+The Tool can either be imported and established locally, using the code provided above or the code can be utilised using our [workbook](https://colab.research.google.com/drive/1Vmu6a4CxAhM5LqZ-ZKn435ZKkuLI_mH3?usp=sharing).
 
 ## **Reference**
 Please cite our manuscript, if you use the OmixLitMiner2.0 for your research:
