@@ -21,37 +21,48 @@ from Bio import Entrez, Medline
 import pandas as pd
 import plotly.express as px
 import io
+import requests
 from openpyxl import Workbook
 import ipywidgets as widgets
 from google.colab import files
 import nltk
-nltk.download('punkt')
+#nltk.download('punkt')
 
 import copy
 #@title Install dependencies and enter input
-#@markdown  Please enter your E-Mail (Needed for the search, you will not receive any E-Mails)
-Mail = 'an.gocke@uke.de'#@param {type:"string"}
-#@markdown  Specify the title of the output file. If you have searched in the title only, it will be added to the filename
-Filename = 'Suppl10_OLM2_2024'#@param {type:"string"}
 
-Protein_List = 'THBS2 CAV2 SCG2 SLC6A1 SAV1 SEZ6L2 ERO1A RAB3B OBSL1 CD109 PTPN14 MRPL35 LRPAP1' #@param {type:"string"}
+Mail = 'an.gocke@uke.de'
+
+#@markdown  Specify whether you want to search PubMed directly or whether you want to use a more generalised approach, utilising the AI-based PubTator3.0. For a list of the differences, please check the publication ().
+PubMed = True #@param {type:"boolean"}
+PubTator3 = False #@param {type:"boolean"}
+
+#@markdown  Specify the title of the output file. If you have searched in the title only, it will be added to the filename
+Filename = 'Filename'#@param {type:"string"}
+
+Protein_List = 'ALB' #@param {type:"string"}
 #@markdown  Specify the type of the Input for the Protein List, set a tick either for the Accession or the Gene Name
 Accession = False #@param {type:"boolean"}
 Gene_name = True #@param {type:"boolean"}
+Gene_name = True
 
-
-if (Accession and Gene_name) or (not Accession and not Gene_name):
-  raise RuntimeError(f'You need to enter either Accession or Gene_name')
+#if (Accession and Gene_name) or (not Accession and not Gene_name):
+#  raise RuntimeError(f'You need to enter either Accession or Gene_name')
 
 #@markdown  Taxonomy ID (e.g. homo sapiens: 9606; mus musculus: 10090)
 TaxID = "9606"#@param {type:"string"}
 
-#@markdown  If you want to enter multiple keywords, please separate them by semicolons. If multiple keywords should be found together in the abstract or title, please tick the "Together" button. Else the tool will search whether one of the keywords was found.
-Together = False #@param {type:"boolean"}
-Keywords = 'migration'#@param {type:"string"}
+#@markdown  If you want to enter multiple keywords, please separate them by semicolons.
+Keywords = 'cancer'#@param {type:"string"}
 
 #@markdown  Checks if the keywords are mentioned  in the title only or in the title and the abstract
-KeywordInTitleOnly = False #@param {type:"boolean"}
+KeywordInTitleOnly = True #@param {type:"boolean"}
+if KeywordInTitleOnly == True:
+  Title = True
+  Title_Abstract = False
+else:
+  Title = False
+  Title_Abstract = True
 
 #@markdown  Set number of how many papers should be maximally retrieved (max 1000)
 maxPaper = 1000 #@param {type:"integer"}
@@ -81,13 +92,14 @@ else:
   IDType = "Gene"
 
 def requestOnUniProtWebpage(uniprotID, idtype, taxid, proteinrequired):
-  start = "https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:"
+  start = "https://rest.uniprot.org/uniprotkb/search?query=reviewed:true"
   middle = '+AND+accession:'\
           if str(idtype).lower() == 'accession' \
-          else "+AND+gene:"
+          else '{}{}{}'.format("+AND+organism_id:", taxid, "+AND+gene:")
   end = '&format=tsv'
-  contents = urllib.request.urlopen('{}{}{}{}{}'.format(start,
-                taxid, middle, uniprotID, end)).read().decode("utf-8")
+  contents = urllib.request.urlopen('{}{}{}{}'.format(start,
+                 middle, uniprotID, end)).read().decode("utf-8")
+
   data = io.StringIO(contents)
   df = pd.read_csv(data, sep="\t", header=0)
   return df
@@ -98,15 +110,32 @@ def getUniProtSynonyms(uniprotID, idtype, taxid):
     syns = [str(x) for x in contents['Gene Names']][0]
     syns = re.sub(r'\s', ',', syns)
     syns = syns.split(",")
+    syns.append(uniprotID)
   else:
-    syns = ''
+    syns = [uniprotID]
   if len(contents['Protein names']) > 0:
-    prots = [str(x) for x in contents['Protein names']][0]
-    contents = re.split(r'\)?\s[\(\[]', re.sub(r'\]|\)', '', prots))
-    for idx in range(len(contents)):
-      cur_str = re.sub(r'^\s', '', contents[idx])
-      cur_str = re.sub(r'\s', '-', cur_str)
-      contents[idx] = re.sub(r'\"|\;', '', cur_str)
+    prots = ([str(x) for x in contents['Protein names']][0])
+    split_parts = re.split(r"\s(?=\()", prots, maxsplit=1)
+    main_part = split_parts[0].strip().replace(' ', '-')
+    remaining_part = prots[len(main_part):]
+    parentheses_parts = []
+    stack = []
+    current = ""
+    for char in remaining_part:
+        if char == "(":
+            if stack:
+                current += char
+            stack.append(char)
+        elif char == ")":
+            stack.pop()
+            if not stack:
+                parentheses_parts.append(current.strip().replace(' ', '-'))
+                current = ""
+            else:
+                current += char
+        elif stack:
+            current += char
+    contents = [main_part] + parentheses_parts
   else:
     contents = ''
   return syns, contents
@@ -115,7 +144,6 @@ def getUniProtSynonyms(uniprotID, idtype, taxid):
 def uniProtQuery(uniprotID, idtype, taxid, keyword, tiab, mail, maxdate):
 
   synonyms, protnames = getUniProtSynonyms(uniprotID, idtype, taxid)
-
   searchsummary = OrderedDict()
   searchsummary['uniprotID'] = uniprotID
   searchsummary['idtype'] = idtype
@@ -123,65 +151,94 @@ def uniProtQuery(uniprotID, idtype, taxid, keyword, tiab, mail, maxdate):
   searchsummary['synonyms'] = synonyms
   searchsummary['protein_names'] = protnames
   searchsummary['keywords'] = keyword
-  searchsummary['keywordInTitleOnly'] = tiab
   searchsummary['totalResults'] = 0
+  searchsummary['reviewResults'] = 0
   searchsummary['category'] = 0
   searchsummary['false'] = 0
+  uniprotSyn = [uniprotID]
+
   papercol = Papercollection(uniprotID, idtype, taxid, synonyms, protnames,\
                              mail, KeywordInTitleOnly, keyword,  maxdate)
-  searchsummary['category'] = papercol.bestCategory()
   searchsummary['totalResults'] = papercol.resultcnt()
-  return searchsummary, papercol, papercol.resultcnt()
+  searchsummary['reviewResults'] = papercol.revcnt()
+  if searchsummary['reviewResults'] > 0:
+    searchsummary['category'] = 1
+  elif searchsummary['totalResults'] > 0:
+    searchsummary['category'] = 2
+  elif searchsummary['synonyms'] == uniprotSyn:
+    searchsummary['category'] = 4
+    searchsummary['synonyms'] = []
+  else:
+    searchsummary['category'] = 3
+  return searchsummary, papercol, papercol.resultcnt(), papercol.revcnt()
 
 
 class Papercollection:
   def __init__(self, uniprotID, idtype, taxid, synonyms, protnames,
                 mail, titleonly, keyword, maxdate):
-    self._titlesPapercollection = ['Titles','Abstracts','Years','Authors',\
+    if PubMed == True:
+      self._titlesPapercollection = ['Titles','Abstracts','Years','Authors',\
                              'Affiliation','Country','PMID','PTyp','Reviews',\
                               'Category','SearchedFor']
-    self._shortTitles = ['TI','AB','DP','AU','AD','PL','PMID','PT']
-    self._uniprotID = uniprotID
-    self._idtype = idtype
-    self._taxid = taxid
-    self._titleonly = titleonly
-    self._mail = mail
-    self._syns = synonyms
-    self._prots = protnames
-    self._papercollection = OrderedDict()
-    self._bestcategory = 4
-    self._PMIDdict = dict()
-    self._maxdate = maxdate
-    self._keywordlist = keyword.split(';')
+      self._shortTitles = ['TI','AB','DP','AU','AD','PL','PMID','PT']
+      self._uniprotID = uniprotID
+      self._idtype = idtype
+      self._taxid = taxid
+      self._titleonly = titleonly
+      self._mail = mail
+      self._syns = synonyms
+      self._prots = protnames
+      self._papercollection = OrderedDict()
+      self._PMIDdict = dict()
+      self._maxdate = maxdate
+      self._keywordlist = keyword.split(';')
+      self._resultcount = 0
+      self._reviewcount = 0
+      fields = '[TI]' if titleonly else ''
+      if len(self._keywordlist) == 1:
+        self._keyword = '{}{}'.format(keyword, fields)
 
-    fields = '[TI]' if titleonly else ''
-    if len(self._keywordlist) == 1:
-      self._keyword = '{}{}'.format(keyword, fields)
+      #mehrere keywords durchgehen
+      elif len(self._keywordlist) >1:
+        for idx in range(len(self._keywordlist)):
+          self._keywordlist[idx] = '{}{}'.format(self._keywordlist[idx],fields)
+        if Together == True:
+          placeholder = ' AND '.join(self._keywordlist)
+        else:
+          placeholder = ' OR '.join(self._keywordlist)
+        self._keyword = '({})'.format(placeholder)
 
-    #mehrere keywords durchgehen
-    elif len(self._keywordlist) >1:
-      for idx in range(len(self._keywordlist)):
-        self._keywordlist[idx] = '{}{}'.format(self._keywordlist[idx],fields)
-      if Together == True:
-        placeholder = ' AND '.join(self._keywordlist)
-      else:
-        placeholder = ' OR '.join(self._keywordlist)
-      self._keyword = '({})'.format(placeholder)
+      for title in self._titlesPapercollection:
+        self._papercollection[title] = list()
+      records, term = self.searchAll(self._syns, self._prots)
+      self.workThroughRecords(records, term, True)
 
-    for title in self._titlesPapercollection:
-      self._papercollection[title] = list()
+    elif PubTator3 == True:
+      self._titlesPapercollection = ['Titles','Authors','Journal','Years',\
+                             'PMID','DOI','Link']
+      self._syns = synonyms
+      self._prots = protnames
+      self._papercollection = OrderedDict()
+      self._keywordlist = keyword.split(';')
+      self._keywordlist = list(self._keywordlist)
 
-    records, term = self.searchAll(self._syns, self._prots)
-    self.workThroughRecords(records, term, True)
+      if len(self._keywordlist) == 1:
+        self._keyword = self._keywordlist
+      #mehrere keywords durchgehen
+      elif len(self._keywordlist) >1:
+        if Together == True:
+          placeholder = '%20AND%20'.join(self._keywordlist)
+          self._keyword = '{}'.format(placeholder)
+        else:
+          self._keyword = self._keywordlist
+      for title in self._titlesPapercollection:
+        self._papercollection[title] = list()
 
-    if self._bestcategory == 4:
-      if len(self._syns) < 1 and len(self._prots) < 1:
-        self._bestcategory = 0
-      else:
-        self._bestcategory = 3
-      if  self.resultcnt() != 0:
-        self._bestcategory = min(self._papercollection['Category'])
+      records, term = self.requestPubTator(self._syns, self._prots)
+      self.parseResultsOPM(records)
 
+  def revcnt(self):
+    return(self._reviewcount)
 
   def categoryOnePaper(self, paper, synonym, keywords, tion):
     allwords, keys = set(), set()
@@ -208,6 +265,7 @@ class Papercollection:
       if reviewtrue:
         category = 1
         review = True
+        self._reviewcount += 1
     else:
       category = 3
     return review, category
@@ -246,14 +304,14 @@ class Papercollection:
   def getPapercolletion(self):
     return self._papercollection
 
-  def bestCategory(self):
-    return self._bestcategory
-
   def resultcnt(self):
-    if self._papercollection['Titles'] == ['nan']:
-      x = 0
+    if PubMed == True:
+      if self._papercollection['Titles'] == ['nan']:
+        x = 0
+      else:
+        x = len(self._papercollection['Titles'])
     else:
-      x = len(self._papercollection['Titles'])
+      x = self._resultcount
     return x
 
   def fetch_handle(self, id_list):
@@ -265,7 +323,9 @@ class Papercollection:
   def searchAll(self,synonyms, proteinnames):
     syns = []
     if len(synonyms) > 0 or len(proteinnames) > 0:
-      syns =  synonyms + proteinnames
+      syns.extend(synonyms)
+      syns.extend(proteinnames)
+
     syns.append(self._uniprotID)
     time.sleep(0.3)
     if len(syns) > 0:
@@ -274,6 +334,9 @@ class Papercollection:
     return(self.fetch_handle(id_list), term)
 
   def searchAllSyns(self, syns):
+    syns = [syn.replace("(", "") for syn in syns]
+    syns = [syn.replace(")", "") for syn in syns]
+    syns = [syn.replace(",", "%2C") for syn in syns]
     self._termquery ='{} AND ({}[TI])'.format(self._keyword, syns[0])
     for syn in syns[1:-1]:
       self._termquery = re.sub(r'\)', '',self._termquery)
@@ -297,8 +360,93 @@ class Papercollection:
       else:
         self._papercollection[self._titlesPapercollection[idx]].append('nan')
 
+  def requestPubTator(self, synonyms, proteinnames):
+    start = "https://www.ncbi.nlm.nih.gov/research/pubtator3-api/search/?text="
+    pubtator = "https://www.ncbi.nlm.nih.gov/research/pubtator3/docsum?text="
+    combAnd = '%20AND%20'
+    syns = []
+    if len(synonyms) > 0 or len(proteinnames) > 0:
+      if isinstance(synonyms, str):
+        synonyms = [synonyms]
+      if isinstance(proteinnames, str):
+        proteinnames = [proteinnames]
+      syns =  synonyms + proteinnames
+    synquery = []
+    if len(self._keyword) >1:
+      for keyword in self._keyword:
+          for syn in syns:
+            if isinstance(syn, list):
+              syn = " ".join(syn)
+            syn = re.sub(r"[()/]", "", syn)
+            syn = '({}{}{})'.format(keyword, combAnd, syn)
+            synquery.append(syn)
+    else:
+        for syn in syns:
+          if isinstance(syn, list):
+            syn = " ".join(syn)
+          syn = re.sub(r"[()/]", "", syn)
+          syn = '({}{}{})'.format(self._keyword, combAnd, syn)
+          synquery.append(syn)
+    protQuery = '%20OR%20'.join(synquery)
+    time.sleep(0.3)
 
-def runMain():
+    url = '{}{}'.format(start,  protQuery)
+    pubLink = '{}{}'.format(pubtator,  protQuery)
+    if Title:
+      title = "&sections=title"
+      url = '{}{}'.format(url, title)
+      pubLink = '{}{}'.format(pubLink, title)
+    elif Title_Abstract:
+      title_abstract = "&sections=title,abstract"
+      url = '{}{}'.format(url, title_abstract)
+      pubLink = '{}{}'.format(pubLink, title_abstract)
+    if Publication_date:
+      pub = "&sort=date%20desc"
+      url = '{}{}'.format(url, pub)
+      pubLink = '{}{}'.format(pubLink, pub)
+
+    contents = requests.get(url)
+    results = contents.json()
+    self._url = pubLink
+    #print(url)
+    return results, url
+
+  def parseResultsOPM(self, records):
+    self._resultcount = 0
+    self._reviewcount = 0
+
+    results = records["results"]
+    for result in results:
+      self._papercollection['Titles'].append(result["title"])
+      if "authors" in result:
+        self._papercollection['Authors'].append(result["authors"])
+      else:
+        self._papercollection['Authors'].append("NaN")
+      self._papercollection['PMID'].append(result["pmid"])
+      self._papercollection['Journal'].append(result["journal"])
+      if "doi" in result:
+        self._papercollection['DOI'].append(result["doi"])
+      else:
+        self._papercollection['DOI'].append("NaN")
+      date = result["meta_date_publication"]
+      date_re = re.search(r'\b\d{4}\b', date)
+      year = int(date_re.group())
+      self._papercollection['Years'].append(year)
+      self._papercollection['Link'].append(self._url)
+
+    facets = records["facets"]
+    if "facet_fields" in facets:
+      facet_fields =facets["facet_fields"]
+      facet_types = facet_fields["type"]
+      for ftype in facet_types:
+        if ftype["name"] == "Review":
+          self._reviewcount =ftype["value"]
+    else:
+      self._reviewcount = 0
+
+    self._resultcount = records["count"]
+
+def runOLM():
   #OmixLitMiner: 13.03.2019
   #maxdate = datetime.date(2019,3,13)
   maxdate= date.today().strftime('%Y/%m/%d')
@@ -310,7 +458,7 @@ def runMain():
   ps.append(['UniprotID', 'Results', 'Synonyms', 'Protein names', 'Category'])
   counter = 2
   for idx in tqdm(range(len(protList))):
-    protquer, papercol, papercnt = uniProtQuery(protList[idx], IDType, TaxID, \
+    protquer, papercol, papercnt, revcnt = uniProtQuery(protList[idx], IDType, TaxID, \
                                                 keywords, KeywordInTitleOnly, \
                                         Mail, maxdate)
     resarray.append([protList[idx], papercnt, protquer['synonyms'], \
@@ -341,12 +489,56 @@ def runMain():
 
   return allRes
 
-allRes = runMain()
+def runOPM():
+  maxdate= date.today().strftime('%Y/%m/%d')
+  papercol_titles = ['Titles','Authors','Journal','Years',\
+                             'PMID','DOI','Link']
+  resarray = list()
+  paperSummary = Workbook()
+  ps = paperSummary.active
+  ps.append( ['UniprotID', 'Results', 'Reviews', 'Synonyms', 'Protein names', 'Category'])
+  counter = 2
+  for idx in tqdm(range(len(protList))):
+    protquer, papercol, papercnt, revcnt = uniProtQuery(protList[idx], IDType, TaxID, \
+                                                keywords, KeywordInTitleOnly, \
+                                        Mail, maxdate)
+    resarray.append([protList[idx], papercnt, revcnt, protquer['synonyms'], \
+                    protquer['protein_names'], protquer['category']])
+    ps.append([protList[idx], papercnt, revcnt, str(protquer['synonyms']), \
+                    str(protquer['protein_names']), protquer['category']])
+    startcnt = counter+1
+    counter+=1
+    ps.append(papercol_titles)
+    papers = papercol.getPapercolletion()
+    for idx in range(len(papers['Titles'])):
+      value = list()
+      for key in papers.keys():
+        value.append(str(papers[key][idx]))
+      ps.append(value)
+      counter +=1
+    ps.row_dimensions.group(startcnt,counter, hidden=True)
+    counter += 1
+
+    allRes = pd.DataFrame(resarray, columns = ['UniprotID', 'Results', 'Reviews',  \
+                                                'Synonyms', 'Protein names', \
+                                                'Category'])
+
+  if KeywordInTitleOnly:
+    paperSummary.save(f'{Filename}_inTitleOnly.xlsx')
+  else:
+    paperSummary.save(f'{Filename}.xlsx')
+
+  return allRes
+
+if PubMed == True:
+  allRes = runOLM()
+else:
+  allRes = runOPM()
 display(allRes)
 
 
 pivot_table = allRes.pivot_table(columns=['Category'], aggfunc='size')
-color_map = {0: '#d4d4d4', 1: '#ff8000', 2: '#ffc080', 3: '#55a0fb'}
+color_map = {1: '#ff8000', 2: '#ffc080', 3: '#55a0fb', 4: '#d4d4d4'}
 colors = [color_map[cat] for cat in pivot_table.index]
 pivot_table.plot.pie(figsize=(6,6),
                      ylabel='',
